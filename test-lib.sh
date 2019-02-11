@@ -16,6 +16,9 @@
 # may be redefined in the specific container testfile
 EXPECTED_EXIT_CODE=0
 
+# Prefer podman to docker unless explicitely stated
+test -n "${OCI_RUNTIME_TOOL-}" || { podman --version &>/dev/null && export OCI_RUNTIME_TOOL=podman || export OCI_RUNTIME_TOOL=docker; }
+
 # ct_cleanup
 # --------------------
 # Cleans up containers used during tests. Stops and removes all containers
@@ -28,13 +31,13 @@ function ct_cleanup() {
     local container=$(cat $cid_file)
 
     : "Stopping and removing container $container..."
-    docker stop $container
-    exit_status=$(docker inspect -f '{{.State.ExitCode}}' $container)
+    $OCI_RUNTIME_TOOL stop $container
+    exit_status=$($OCI_RUNTIME_TOOL inspect -f '{{.State.ExitCode}}' $container)
     if [ "$exit_status" != "$EXPECTED_EXIT_CODE" ]; then
       : "Dumping logs for $container"
-      docker logs $container
+      $OCI_RUNTIME_TOOL logs $container
     fi
-    docker rm -v $container
+    $OCI_RUNTIME_TOOL rm -v $container
     rm $cid_file
   done
   rmdir $CID_FILE_DIR
@@ -64,7 +67,7 @@ function ct_get_cid() {
 # Argument: id - container id
 function ct_get_cip() {
   local id="$1" ; shift
-  docker inspect --format='{{.NetworkSettings.IPAddress}}' $(ct_get_cid "$id")
+  $OCI_RUNTIME_TOOL inspect --format='{{.NetworkSettings.IPAddress}}' $(ct_get_cid "$id")
 }
 
 # ct_wait_for_cid [cid_file]
@@ -105,20 +108,20 @@ function ct_assert_container_creation_fails() {
   if [ $? -eq 0 ]; then
     local cid=$(ct_get_cid $cid_file)
 
-    while [ "$(docker inspect -f '{{.State.Running}}' $cid)" == "true" ] ; do
+    while [ "$($OCI_RUNTIME_TOOL inspect -f '{{.State.Running}}' $cid)" == "true" ] ; do
       sleep 2
       attempt=$(( $attempt + 1 ))
       if [ $attempt -gt $max_attempts ]; then
-        docker stop $cid
+        $OCI_RUNTIME_TOOL stop $cid
         ret=1
         break
       fi
     done
-    exit_status=$(docker inspect -f '{{.State.ExitCode}}' $cid)
+    exit_status=$($OCI_RUNTIME_TOOL inspect -f '{{.State.ExitCode}}' $cid)
     if [ "$exit_status" == "0" ]; then
       ret=1
     fi
-    docker rm -v $cid
+    $OCI_RUNTIME_TOOL rm -v $cid
     rm $CID_FILE_DIR/$cid_file
   fi
   [ ! -z $old_container_args ] && CONTAINER_ARGS="$old_container_args"
@@ -134,12 +137,12 @@ function ct_assert_container_creation_fails() {
 # Argument: name - name of cid_file where the container id will be stored
 # Argument: command - optional command to be executed in the container
 # Uses: $CID_FILE_DIR - path to directory containing cid_files
-# Uses: $CONTAINER_ARGS - optional arguments passed directly to docker run
+# Uses: $CONTAINER_ARGS - optional arguments passed directly to $OCI_RUNTIME_TOOL run
 # Uses: $IMAGE_NAME - name of the image being tested
 function ct_create_container() {
   local cid_file="$CID_FILE_DIR/$1" ; shift
   # create container with a cidfile in a directory for cleanup
-  docker run --cidfile="$cid_file" -d ${CONTAINER_ARGS:-} $IMAGE_NAME "$@"
+  $OCI_RUNTIME_TOOL run --cidfile="$cid_file" -d ${CONTAINER_ARGS:-} $IMAGE_NAME "$@"
   ct_wait_for_cid $cid_file || return 1
   : "Created container $(cat $cid_file)"
 }
@@ -159,17 +162,17 @@ function ct_scl_usage_old() {
   local expected="$3"
   local out=""
   : "  Testing the image SCL enable"
-  out=$(docker run --rm ${IMAGE_NAME} /bin/bash -c "${command}")
+  out=$($OCI_RUNTIME_TOOL run --rm ${IMAGE_NAME} /bin/bash -c "${command}")
   if ! echo "${out}" | grep -q "${expected}"; then
     echo "ERROR[/bin/bash -c "${command}"] Expected '${expected}', got '${out}'" >&2
     return 1
   fi
-  out=$(docker exec $(ct_get_cid $name) /bin/bash -c "${command}" 2>&1)
+  out=$($OCI_RUNTIME_TOOL exec $(ct_get_cid $name) /bin/bash -c "${command}" 2>&1)
   if ! echo "${out}" | grep -q "${expected}"; then
     echo "ERROR[exec /bin/bash -c "${command}"] Expected '${expected}', got '${out}'" >&2
     return 1
   fi
-  out=$(docker exec $(ct_get_cid $name) /bin/sh -ic "${command}" 2>&1)
+  out=$($OCI_RUNTIME_TOOL exec $(ct_get_cid $name) /bin/sh -ic "${command}" 2>&1)
   if ! echo "${out}" | grep -q "${expected}"; then
     echo "ERROR[exec /bin/sh -ic "${command}"] Expected '${expected}', got '${out}'" >&2
     return 1
@@ -188,7 +191,7 @@ function ct_doc_content_old() {
   : "  Testing documentation in the container image"
   # Extract the help files from the container
   for f in help.1 ; do
-    docker run --rm ${IMAGE_NAME} /bin/bash -c "cat /${f}" >${tmpdir}/$(basename ${f})
+    $OCI_RUNTIME_TOOL run --rm ${IMAGE_NAME} /bin/bash -c "cat /${f}" >${tmpdir}/$(basename ${f})
     # Check whether the files contain some important information
     for term in $@ ; do
       if ! cat ${tmpdir}/$(basename ${f}) | grep -F -q -e "${term}" ; then
@@ -214,14 +217,14 @@ function ct_doc_content_old() {
 function ct_npm_works() {
   local tmpdir=$(mktemp -d)
   : "  Testing npm in the container image"
-  docker run --rm ${IMAGE_NAME} /bin/bash -c "npm --version" >${tmpdir}/version
+  $OCI_RUNTIME_TOOL run --rm ${IMAGE_NAME} /bin/bash -c "npm --version" >${tmpdir}/version
 
   if [ $? -ne 0 ] ; then
     echo "ERROR: 'npm --version' does not work inside the image ${IMAGE_NAME}." >&2
     return 1
   fi
 
-  docker run --rm ${IMAGE_NAME} /bin/bash -c "npm install jquery && test -f node_modules/jquery/src/jquery.js"
+  $OCI_RUNTIME_TOOL run --rm ${IMAGE_NAME} /bin/bash -c "npm install jquery && test -f node_modules/jquery/src/jquery.js"
   if [ $? -ne 0 ] ; then
     echo "ERROR: npm could not install jquery inside the image ${IMAGE_NAME}." >&2
     return 1
@@ -434,7 +437,7 @@ ct_s2i_usage()
     local img_name=$1; shift
     local s2i_args="$*";
     local usage_command="/usr/libexec/s2i/usage"
-    docker run --rm "$img_name" bash -c "$usage_command"
+    $OCI_RUNTIME_TOOL run --rm "$img_name" bash -c "$usage_command"
 }
 
 # ct_s2i_build_as_df APP_PATH SRC_IMAGE DST_IMAGE [S2I_ARGS]
@@ -461,8 +464,8 @@ ct_s2i_build_as_df()
     df_name=$(mktemp -p "$tmpdir" Dockerfile.XXXX)
     pushd "$tmpdir"
     # Check if the image is available locally and try to pull it if it is not
-    docker images "$src_image" &>/dev/null || echo "$s2i_args" | grep -q "pull-policy=never" || docker pull "$src_image"
-    user_id=$(docker inspect -f "{{.Config.User}}" "$src_image")
+    $OCI_RUNTIME_TOOL images "$src_image" &>/dev/null || echo "$s2i_args" | grep -q "pull-policy=never" || $OCI_RUNTIME_TOOL pull "$src_image"
+    user_id=$($OCI_RUNTIME_TOOL inspect -f "{{.Config.User}}" "$src_image")
     # Strip file:// from APP_PATH and copy its contents into current context
     mkdir -p "$local_app"
     cp -r "${app_path/file:\/\//}/." "$local_app"
@@ -502,7 +505,7 @@ EOF
         echo "CMD /usr/libexec/s2i/run" >>"$df_name"
     fi
     # Run the build and tag the result
-    docker build -f "$df_name" -t "$dst_image" .
+    $OCI_RUNTIME_TOOL build -f "$df_name" -t "$dst_image" .
     popd
 }
 
